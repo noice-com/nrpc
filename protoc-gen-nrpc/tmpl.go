@@ -38,15 +38,15 @@ type {{$typesPrefix}}{{.GetName}}Server interface {
 		, {{ . }} string
 		{{- end -}}
 		{{- if ne .GetInputType ".nrpc.Void" -}}
-		, req {{GoType .GetInputType}}
+		, req *{{GoType .GetInputType}}
 		{{- end -}}
 		{{- if HasStreamedReply . -}}
-		, pushRep func({{GoType .GetOutputType}})
+		, pushRep func(*{{GoType .GetOutputType}})
 		{{- end -}}
 	)
 		{{- if ne $resultType ".nrpc.NoReply" }} (
 		{{- if and (ne $resultType ".nrpc.Void") (not (HasStreamedReply .)) -}}
-		resp {{GoType $resultType}}, {{end -}}
+		resp *{{GoType $resultType}}, {{end -}}
 		err error)
 		{{- end -}}
 	{{- end}}
@@ -159,9 +159,9 @@ func (h *{{$serviceName}}Handler) {{.GetName}}Publish(
 	{{- range $pkgSubjectParams}}pkg{{.}} string, {{end -}}
 	{{- range $serviceSubjectParams}}svc{{.}} string, {{end -}}
 	{{- range GetMethodSubjectParams .}}mt{{.}} string, {{end -}}
-	msg {{GoType .GetOutputType}}) error {
+	msg *{{GoType .GetOutputType}}) error {
 	for _, encoding := range h.encodings {
-		rawMsg, err := nrpc.Marshal(encoding, &msg)
+		rawMsg, err := nrpc.Marshal(encoding, msg)
 		if err != nil {
 			log.Printf("{{$serviceName}}Handler.{{.GetName}}Publish: error marshaling the message: %s", err)
 			return err
@@ -254,20 +254,20 @@ func (h *{{.GetName}}Handler) Handler(msg *nats.Msg) {
 				, mtParams[{{ $i }}]
 				{{- end -}}
 				{{- if ne .GetInputType ".nrpc.Void" -}}
-				, req
+				, &req
 				{{- end -}}
-				, func(rep {{GoType .GetOutputType}}){
-					request.SendStreamReply(&rep)
+				, func(rep *{{GoType .GetOutputType}}){
+					request.SendStreamReply(rep)
 				})
 				return nil, err
 			}
 			{{- else }}
 			request.Handler = func(ctx context.Context)(proto.Message, error){
 				{{- if eq .GetOutputType ".nrpc.NoReply" -}}
-				var innerResp nrpc.NoReply
+				innerResp := &nrpc.NoReply{}
 				{{else}}
 				{{if eq .GetOutputType ".nrpc.Void" -}}
-				var innerResp nrpc.Void
+				innerResp := &nrpc.Void{}
 				{{else}}innerResp, {{end -}}
 				err := {{end -}}
 				h.server.{{.GetName}}(ctx
@@ -275,13 +275,13 @@ func (h *{{.GetName}}Handler) Handler(msg *nats.Msg) {
 				, mtParams[{{ $i }}]
 				{{- end -}}
 				{{- if ne .GetInputType ".nrpc.Void" -}}
-				, req
+				, &req
 				{{- end -}}
 				)
 				if err != nil {
 					return nil, err
 				}
-				return &innerResp, err
+				return innerResp, err
 			}
 			{{- end }}
 		}
@@ -416,13 +416,16 @@ type {{$serviceName}}{{.GetName}}Subscription struct {
 	encoding string
 }
 
-func (s *{{$serviceName}}{{.GetName}}Subscription) Next(timeout time.Duration) (next {{GoType .GetOutputType}}, err error) {
+func (s *{{$serviceName}}{{.GetName}}Subscription) Next(timeout time.Duration) (*{{GoType .GetOutputType}}, error) {
 	msg, err := s.Subscription.NextMsg(timeout)
 	if err != nil {
-		return
+		return nil, err
 	}
-	err = nrpc.Unmarshal(s.encoding, msg.Data, &next)
-	return
+	var next {{GoType .GetOutputType}}
+	if err := nrpc.Unmarshal(s.encoding, msg.Data, &next); err != nil {
+		return nil, err
+	}
+	return &next, nil
 }
 
 func (c *{{$serviceName}}Client) {{.GetName}}SubscribeSync(
@@ -441,7 +444,7 @@ func (c *{{$serviceName}}Client) {{.GetName}}SubscribeSync(
 
 func (c *{{$serviceName}}Client) {{.GetName}}Subscribe(
 	{{range GetMethodSubjectParams .}}mt{{.}} string,{{end}}
-	handler func ({{GoType .GetOutputType}}),
+	handler func (*{{GoType .GetOutputType}}),
 ) (sub *nats.Subscription, err error) {
 	subject := c.{{.GetName}}Subject(
 		{{range GetMethodSubjectParams .}}mt{{.}},{{end}}
@@ -453,18 +456,18 @@ func (c *{{$serviceName}}Client) {{.GetName}}Subscribe(
 			log.Printf("{{$serviceName}}Client.{{.GetName}}Subscribe: Error decoding, %s", err)
 			return
 		}
-		handler(pmsg)
+		handler(&pmsg)
 	})
 	return
 }
 
 func (c *{{$serviceName}}Client) {{.GetName}}SubscribeChan(
 	{{range GetMethodSubjectParams .}}mt{{.}} string,{{end}}
-) (<-chan {{GoType .GetOutputType}}, *nats.Subscription, error) {
-	ch := make(chan {{GoType .GetOutputType}})
+) (<-chan *{{GoType .GetOutputType}}, *nats.Subscription, error) {
+	ch := make(chan *{{GoType .GetOutputType}})
 	sub, err := c.{{.GetName}}Subscribe(
 		{{- range GetMethodSubjectParams .}}mt{{.}}, {{end -}}
-		func (msg {{GoType .GetOutputType}}) {
+		func (msg *{{GoType .GetOutputType}}) {
 		ch <- msg
 	})
 	return ch, sub, err
@@ -478,9 +481,9 @@ func (c *{{$serviceName}}Client) {{.GetName}}(
 	{{ . }} string,
 	{{- end}}
 	{{- if ne .GetInputType ".nrpc.Void"}}
-	req {{GoType .GetInputType}},
+	req *{{GoType .GetInputType}},
 	{{- end}}
-	cb func (context.Context, {{GoType .GetOutputType}}),
+	cb func (context.Context, *{{GoType .GetOutputType}}),
 ) error {
 {{- if Prometheus}}
 	start := time.Now()
@@ -496,7 +499,7 @@ func (c *{{$serviceName}}Client) {{.GetName}}(
 
 	sub, err := nrpc.StreamCall(ctx, c.nc, subject
 		{{- if ne .GetInputType ".nrpc.Void" -}}
-		, &req
+		, req
 		{{- else -}}
 		, &nrpc.Void{}
 		{{- end -}}
@@ -509,13 +512,12 @@ func (c *{{$serviceName}}Client) {{.GetName}}(
 		return err
 	}
 
-	var res {{GoType .GetOutputType}}
 	for {
-		err = sub.Next(&res)
-		if err != nil {
+		var res {{GoType .GetOutputType}}
+		if err = sub.Next(&res); err != nil {
 			break
 		}
-		cb(ctx, res)
+		cb(ctx, &res)
 	}
 	if err == nrpc.ErrEOS {
 		err = nil
@@ -535,11 +537,11 @@ func (c *{{$serviceName}}Client) {{.GetName}}(
 	{{- range GetMethodSubjectParams . -}}
 	{{ . }} string, {{ end -}}
 	{{- if ne .GetInputType ".nrpc.Void" -}}
-	req {{GoType .GetInputType}}
+	req *{{GoType .GetInputType}}
 	{{- end -}}) (
 		{{- if not (eq $resultType ".nrpc.Void" ".nrpc.NoReply") -}}
-		resp {{GoType $resultType}}, {{end -}}
-		err error) {
+		*{{GoType $resultType}}, {{end -}}
+		error) {
 {{- if Prometheus}}
 	start := time.Now()
 {{- end}}
@@ -555,18 +557,20 @@ func (c *{{$serviceName}}Client) {{.GetName}}(
 
 	// call
 	{{- if eq .GetInputType ".nrpc.Void"}}
-	var req {{GoType .GetInputType}}
+	req := &{{GoType .GetInputType}}{}
 	{{- end}}
-	{{- if eq .GetOutputType ".nrpc.Void" ".nrpc.NoReply"}}
+
 	var resp {{GoType .GetOutputType}}
-	{{- end}}
-	err = nrpc.Call(&req, &resp, c.nc, subject, c.Encoding, c.Timeout)
-	if err != nil {
+	if err := nrpc.Call(req, &resp, c.nc, subject, c.Encoding, c.Timeout); err != nil {
 {{- if Prometheus}}
 		clientCallsFor{{$serviceName}}.WithLabelValues(
 			"{{.GetName}}", c.Encoding, "call_fail").Inc()
 {{- end}}
-		return // already logged
+		{{- if eq .GetOutputType ".nrpc.Void" ".nrpc.NoReply"}}
+		return err // already logged
+		{{- else}}
+		return nil, err // already logged
+		{{- end}}
 	}
 
 {{- if Prometheus}}
@@ -578,7 +582,11 @@ func (c *{{$serviceName}}Client) {{.GetName}}(
 		"{{.GetName}}", c.Encoding, "success").Inc()
 {{- end}}
 
-	return
+	{{- if eq .GetOutputType ".nrpc.Void" ".nrpc.NoReply"}}
+	return nil
+	{{- else}}
+	return &resp, nil
+	{{- end}}
 }
 
 {{- if HasPollEnabled .}}
@@ -586,10 +594,8 @@ func (c *{{$serviceName}}Client) {{.GetName}}(
 func (c *{{$serviceName}}Client) {{.GetName}}Poll(
 	{{- range GetMethodSubjectParams . -}}
 	{{ . }} string, {{ end -}}
-	{{- if ne .GetInputType ".nrpc.Void" -}}
-	req {{GoType .GetInputType}},
-	{{- end -}}
-	maxreplies int, cb func ({{GoType .GetOutputType}}) error,
+	{{- if ne .GetInputType ".nrpc.Void" -}} req *{{GoType .GetInputType}}, {{ end -}}
+	maxreplies int, cb func (*{{GoType .GetOutputType}}) error,
 ) (error) {
 {{- if Prometheus}}
 	start := time.Now()
@@ -610,9 +616,9 @@ func (c *{{$serviceName}}Client) {{.GetName}}Poll(
 
 	var resp {{GoType .GetOutputType}}
 
-	err := nrpc.Poll(&req, &resp, c.nc, subject, c.Encoding, c.Timeout, maxreplies, 
+	err := nrpc.Poll(req, &resp, c.nc, subject, c.Encoding, c.Timeout, maxreplies, 
 		func() error {
-			return cb(resp)
+			return cb(&resp)
 		},
 	)
 	if err != nil {
